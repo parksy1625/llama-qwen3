@@ -1,0 +1,117 @@
+name: Build Qwen3 llama.cpp for LTSC 1809
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download llama.cpp b5092 source
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -UseBasicParsing `
+            'https://github.com/ggml-org/llama.cpp/archive/refs/tags/b5092.zip' `
+            -OutFile 'b5092.zip'
+          Expand-Archive -LiteralPath 'b5092.zip' -DestinationPath '.' -Force
+          if (-not (Test-Path 'llama.cpp-b5092\CMakeLists.txt')) { throw 'source not found' }
+
+      - name: Locate Visual Studio
+        id: vs
+        shell: powershell
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          if (-not $vs) { throw 'Visual Studio not found' }
+          "path=$vs" >> $env:GITHUB_OUTPUT
+          Write-Host "VS=$vs"
+
+      - name: Configure minimal static CPU build
+        shell: cmd
+        run: |
+          call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -S llama.cpp-b5092 -B build -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+            -DBUILD_SHARED_LIBS=OFF ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_AVX=ON ^
+            -DGGML_AVX2=ON ^
+            -DGGML_AVX512=OFF ^
+            -DGGML_AVX512_VBMI=OFF ^
+            -DGGML_AVX512_VNNI=OFF ^
+            -DGGML_AVX512_BF16=OFF ^
+            -DGGML_AVX_VNNI=OFF ^
+            -DGGML_BLAS=OFF ^
+            -DGGML_CUDA=OFF ^
+            -DGGML_VULKAN=OFF ^
+            -DGGML_SYCL=OFF ^
+            -DGGML_RPC=OFF ^
+            -DLLAMA_CURL=OFF ^
+            -DLLAMA_OPENSSL=OFF ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DLLAMA_BUILD_EXAMPLES=OFF ^
+            -DLLAMA_BUILD_TOOLS=OFF ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DCMAKE_C_FLAGS="/D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00" ^
+            -DCMAKE_CXX_FLAGS="/D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00"
+
+      - name: Build llama-server
+        shell: cmd
+        run: |
+          call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat"
+          cmake --build build --target llama-server -j 2
+
+      - name: Collect binaries
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $server = Get-ChildItem build -Recurse -Filter llama-server.exe | Select-Object -First 1
+          if (-not $server) { throw 'llama-server.exe not found' }
+          Copy-Item $server.FullName dist\llama-server.exe
+          Get-ChildItem $server.Directory.FullName -Filter '*.dll' -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path 'dist' $_.Name)
+          }
+          Get-ChildItem build -Recurse -Include 'ggml*.dll','llama.dll' -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path 'dist' $_.Name) -Force
+          }
+          @'
+          @echo off
+          cd /d "%~dp0"
+          llama-server.exe --version
+          echo.
+          echo Exit code: %errorlevel%
+          pause
+          '@ | Set-Content -Encoding ASCII dist\TEST_VERSION.bat
+          @'
+          Qwen3 LTSC 1809 experimental build
+          Source: llama.cpp b5092
+          Runner: windows-2022
+          CPU: x64 AVX2
+          GGML_NATIVE: OFF
+          Static CRT requested
+          CUDA/Vulkan/SYCL/BLAS/RPC/CURL/OpenSSL disabled
+          '@ | Set-Content -Encoding UTF8 dist\BUILD_INFO.txt
+          Get-ChildItem dist | Format-Table Name,Length
+
+      - name: Smoke test on runner
+        shell: cmd
+        run: |
+          dist\llama-server.exe --version
+
+      - name: Upload LTSC 1809 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-qwen3-ltsc1809-b5092-avx2
+          path: dist\*
+          if-no-files-found: error
+          compression-level: 9
