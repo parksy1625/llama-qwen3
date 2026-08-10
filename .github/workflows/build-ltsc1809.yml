@@ -56,10 +56,8 @@ jobs:
             -DGGML_SYCL=OFF ^
             -DGGML_RPC=OFF ^
             -DLLAMA_CURL=OFF ^
-            -DLLAMA_OPENSSL=OFF ^
             -DLLAMA_BUILD_TESTS=OFF ^
-            -DLLAMA_BUILD_EXAMPLES=OFF ^
-            -DLLAMA_BUILD_TOOLS=OFF ^
+            -DLLAMA_BUILD_EXAMPLES=ON ^
             -DLLAMA_BUILD_SERVER=ON ^
             -DCMAKE_C_FLAGS="/D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00" ^
             -DCMAKE_CXX_FLAGS="/D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00"
@@ -95,11 +93,10 @@ jobs:
           @'
           Qwen3 LTSC 1809 experimental build
           Source: llama.cpp b5092
-          Runner: windows-2022
           CPU: x64 AVX2
           GGML_NATIVE: OFF
           Static CRT requested
-          CUDA/Vulkan/SYCL/BLAS/RPC/CURL/OpenSSL disabled
+          CUDA/Vulkan/SYCL/BLAS/RPC/CURL disabled
           '@ | Set-Content -Encoding UTF8 dist\BUILD_INFO.txt
           Get-ChildItem dist | Format-Table Name,Length
 
