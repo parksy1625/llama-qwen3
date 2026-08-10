@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -24,7 +24,7 @@ jobs:
           Expand-Archive -LiteralPath 'b5092.zip' -DestinationPath '.' -Force
           if (-not (Test-Path 'llama.cpp-b5092\CMakeLists.txt')) { throw 'source not found' }
 
-      - name: Locate Visual Studio
+      - name: Locate Visual Studio 2022
         id: vs
         shell: powershell
         run: |
@@ -34,10 +34,40 @@ jobs:
           "path=$vs" >> $env:GITHUB_OUTPUT
           Write-Host "VS=$vs"
 
-      - name: Configure minimal static CPU build
+      - name: Install MSVC v142 toolset if missing
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vs = '${{ steps.vs.outputs.path }}'
+          $v142 = Get-ChildItem "$vs\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '14.29*' } | Select-Object -First 1
+          if (-not $v142) {
+            Write-Host 'MSVC v142 14.29 not present. Installing component group...'
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            if (-not (Test-Path $installer)) { throw "vs_installer.exe not found: $installer" }
+            $args = @(
+              'modify',
+              '--installPath', $vs,
+              '--add', 'Microsoft.VisualStudio.ComponentGroup.VC.Tools.142.x86.x64',
+              '--quiet', '--norestart', '--nocache'
+            )
+            $p = Start-Process -FilePath $installer -ArgumentList $args -Wait -PassThru
+            if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "VS installer failed: $($p.ExitCode)" }
+          }
+          $v142 = Get-ChildItem "$vs\VC\Tools\MSVC" -Directory | Where-Object { $_.Name -like '14.29*' } | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $v142) { throw 'MSVC v142 14.29 still not found after install' }
+          Write-Host "Using v142 directory: $($v142.FullName)"
+
+      - name: Verify compiler is really MSVC 19.29
         shell: cmd
         run: |
-          call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat"
+          call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.29
+          cl 2>&1 | findstr /C:"19.29"
+          if errorlevel 1 exit /b 1
+
+      - name: Configure v142 static AVX2 build
+        shell: cmd
+        run: |
+          call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.29
           cmake -S llama.cpp-b5092 -B build -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
@@ -59,13 +89,14 @@ jobs:
             -DLLAMA_BUILD_TESTS=OFF ^
             -DLLAMA_BUILD_EXAMPLES=ON ^
             -DLLAMA_BUILD_SERVER=ON ^
+            -DGGML_OPENMP=OFF ^
             -DCMAKE_C_FLAGS="/D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00" ^
             -DCMAKE_CXX_FLAGS="/D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00"
 
-      - name: Build llama-server
+      - name: Build llama-server with v142
         shell: cmd
         run: |
-          call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat"
+          call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.29
           cmake --build build --target llama-server -j 2
 
       - name: Collect binaries
@@ -91,10 +122,12 @@ jobs:
           pause
           '@ | Set-Content -Encoding ASCII dist\TEST_VERSION.bat
           @'
-          Qwen3 LTSC 1809 experimental build
+          Qwen3 LTSC 1809 compatibility build v3
           Source: llama.cpp b5092
+          Compiler target: MSVC v142 / 14.29 / 19.29
           CPU: x64 AVX2
           GGML_NATIVE: OFF
+          OpenMP: OFF
           Static CRT requested
           CUDA/Vulkan/SYCL/BLAS/RPC/CURL disabled
           '@ | Set-Content -Encoding UTF8 dist\BUILD_INFO.txt
@@ -108,7 +141,7 @@ jobs:
       - name: Upload LTSC 1809 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llama-qwen3-ltsc1809-b5092-avx2
+          name: llama-qwen3-ltsc1809-b5092-v142-avx2
           path: dist\*
           if-no-files-found: error
           compression-level: 9
