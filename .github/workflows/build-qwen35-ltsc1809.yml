@@ -98,6 +98,28 @@ jobs:
           Get-ChildItem build -Recurse -Include 'ggml*.dll','llama.dll' -File -ErrorAction SilentlyContinue | ForEach-Object {
             Copy-Item $_.FullName (Join-Path 'dist' $_.Name) -Force
           }
+
+          $opensslCandidates = @(
+            'C:\Program Files\OpenSSL\bin',
+            'C:\Program Files\OpenSSL-Win64\bin',
+            'C:\Program Files\OpenSSL\lib\VC\x64\MD',
+            'C:\Program Files\OpenSSL\lib\VC\x64\MT'
+          )
+          $opensslDlls = @('libssl-3-x64.dll','libcrypto-3-x64.dll')
+          foreach ($dll in $opensslDlls) {
+            $found = $null
+            foreach ($dir in $opensslCandidates) {
+              $p = Join-Path $dir $dll
+              if (Test-Path $p) { $found = $p; break }
+            }
+            if (-not $found) {
+              $found = Get-ChildItem 'C:\Program Files' -Recurse -Filter $dll -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+            }
+            if (-not $found) { throw "$dll not found on runner" }
+            Copy-Item $found (Join-Path 'dist' $dll) -Force
+            Write-Host "Bundled $dll from $found"
+          }
+
           $bat = @(
             '@echo off',
             'cd /d "%~dp0"',
@@ -115,6 +137,7 @@ jobs:
           GGML_NATIVE: OFF
           OpenMP: OFF
           Static CRT requested
+          OpenSSL runtime DLLs bundled
           CUDA/Vulkan/SYCL/BLAS/RPC/CURL disabled
           '@ | Set-Content -Encoding UTF8 dist\BUILD_INFO.txt
           Get-ChildItem dist | Format-Table Name,Length
@@ -127,7 +150,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llama-qwen35-ltsc1809-b10516-v142-avx2
+          name: llama-qwen35-ltsc1809-b10516-v142-avx2-openssl
           path: dist\*
           if-no-files-found: error
           compression-level: 9
