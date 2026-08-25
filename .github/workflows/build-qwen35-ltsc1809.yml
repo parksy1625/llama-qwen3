@@ -2,6 +2,8 @@ name: Build Qwen3.5 llama.cpp for LTSC 1809
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
 
 jobs:
   build:
