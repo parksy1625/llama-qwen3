@@ -12,6 +12,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Download llama.cpp b10516 source
         shell: powershell
         run: |
@@ -19,6 +20,7 @@ jobs:
           Invoke-WebRequest -UseBasicParsing 'https://github.com/ggml-org/llama.cpp/archive/refs/tags/b10516.zip' -OutFile 'llama-b10516.zip'
           Expand-Archive -LiteralPath 'llama-b10516.zip' -DestinationPath '.' -Force
           if (-not (Test-Path 'llama.cpp-b10516\src\models\qwen35.cpp')) { throw 'Qwen3.5 support not found' }
+
       - name: Locate Visual Studio
         id: vs
         shell: powershell
@@ -27,6 +29,7 @@ jobs:
           $vs = & $vswhere -latest -products * -property installationPath
           if (-not $vs) { throw 'Visual Studio not found' }
           "path=$vs" >> $env:GITHUB_OUTPUT
+
       - name: Install MSVC v142 if missing
         shell: powershell
         run: |
@@ -38,11 +41,14 @@ jobs:
             $p = Start-Process -FilePath $installer -ArgumentList @('modify','--installPath',$vs,'--add','Microsoft.VisualStudio.ComponentGroup.VC.Tools.142.x86.x64','--quiet','--norestart','--nocache') -Wait -PassThru
             if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "VS installer failed: $($p.ExitCode)" }
           }
+
       - name: Verify MSVC 19.29
         shell: cmd
         run: |
           call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.29
           cl 2>&1 | findstr /C:"19.29"
+          if errorlevel 1 exit /b 1
+
       - name: Configure
         shell: cmd
         run: |
@@ -55,6 +61,10 @@ jobs:
             -DGGML_AVX=ON ^
             -DGGML_AVX2=ON ^
             -DGGML_AVX512=OFF ^
+            -DGGML_AVX512_VBMI=OFF ^
+            -DGGML_AVX512_VNNI=OFF ^
+            -DGGML_AVX512_BF16=OFF ^
+            -DGGML_AVX_VNNI=OFF ^
             -DGGML_BLAS=OFF ^
             -DGGML_CUDA=OFF ^
             -DGGML_VULKAN=OFF ^
@@ -64,28 +74,60 @@ jobs:
             -DLLAMA_BUILD_TESTS=OFF ^
             -DLLAMA_BUILD_EXAMPLES=ON ^
             -DLLAMA_BUILD_SERVER=ON ^
-            -DGGML_OPENMP=OFF
+            -DGGML_OPENMP=OFF ^
+            -DCMAKE_C_FLAGS="/D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00" ^
+            -DCMAKE_CXX_FLAGS="/D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00"
+
       - name: Build
         shell: cmd
         run: |
           call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.29
           cmake --build build --target llama-server -j 2
+
       - name: Collect
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force dist | Out-Null
           $server = Get-ChildItem build -Recurse -Filter llama-server.exe | Select-Object -First 1
           if (-not $server) { throw 'llama-server.exe not found' }
           Copy-Item $server.FullName dist\llama-server.exe
-          Get-ChildItem $server.Directory.FullName -Filter '*.dll' -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName (Join-Path 'dist' $_.Name) }
-          Get-ChildItem build -Recurse -Include 'ggml*.dll','llama.dll' -File -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName (Join-Path 'dist' $_.Name) -Force }
-          "@echo off`r`ncd /d \"%~dp0\"`r`nllama-server.exe --version`r`necho Exit code: %errorlevel%`r`npause" | Set-Content -Encoding ASCII dist\TEST_VERSION.bat
+          Get-ChildItem $server.Directory.FullName -Filter '*.dll' -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path 'dist' $_.Name)
+          }
+          Get-ChildItem build -Recurse -Include 'ggml*.dll','llama.dll' -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path 'dist' $_.Name) -Force
+          }
+          $bat = @(
+            '@echo off',
+            'cd /d "%~dp0"',
+            'llama-server.exe --version',
+            'echo.',
+            'echo Exit code: %errorlevel%',
+            'pause'
+          )
+          [System.IO.File]::WriteAllLines((Join-Path (Resolve-Path dist) 'TEST_VERSION.bat'), $bat, [System.Text.Encoding]::ASCII)
+          @'
+          Qwen3.5 LTSC 1809 compatibility build
+          Source: llama.cpp b10516
+          Compiler target: MSVC v142 / 14.29 / 19.29
+          CPU: x64 AVX2
+          GGML_NATIVE: OFF
+          OpenMP: OFF
+          Static CRT requested
+          CUDA/Vulkan/SYCL/BLAS/RPC/CURL disabled
+          '@ | Set-Content -Encoding UTF8 dist\BUILD_INFO.txt
+          Get-ChildItem dist | Format-Table Name,Length
+
       - name: Smoke test
         shell: cmd
-        run: dist\llama-server.exe --version
+        run: |
+          dist\llama-server.exe --version
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: llama-qwen35-ltsc1809-b10516-v142-avx2
           path: dist\*
+          if-no-files-found: error
           compression-level: 9
