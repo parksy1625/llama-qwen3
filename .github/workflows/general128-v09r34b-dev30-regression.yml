@@ -1,0 +1,19 @@
+name: General-128 V0.9R3.4B dev30 regression
+on:
+  push:
+    branches: [general128-v09r34-generic-graph]
+    paths:
+      - general128_v09r34b.py
+      - test_general128_v09r34b_dev30.py
+      - .github/workflows/general128-v09r34b-dev30-regression.yml
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install 'datasets>=3.0,<5' pyarrow numpy
+      - run: python -m py_compile general128_v09r34b.py test_general128_v09r34b_dev30.py
+      - run: python test_general128_v09r34b_dev30.py
