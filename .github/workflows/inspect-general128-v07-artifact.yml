@@ -1,0 +1,31 @@
+name: Inspect General-128 V0.7 artifact
+
+on:
+  push:
+    branches: [general128-v07-inspect]
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download previous benchmark artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: general128-v07-qwen05-docker-results
+          path: previous
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: parksy1625/llama-qwen3
+          run-id: 34032273386
+
+      - name: Print scored result and Qwen raw outputs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find previous -maxdepth 3 -type f -print
+          echo '=== SCORES ==='
+          cat previous/benchmark_results/scores.json
+          echo '=== QWEN RAW ==='
+          cat previous/benchmark_results/Qwen2.5-0.5B-Instruct-Q4_K_M_raw.json
+          echo '=== MODEL ID ==='
+          cat previous/benchmark_results/qwen_model_identity.txt
