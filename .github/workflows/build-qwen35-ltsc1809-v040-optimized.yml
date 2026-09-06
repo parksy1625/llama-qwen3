@@ -1,0 +1,206 @@
+name: Build Qwen3.5 2B Q4 Optimized for LTSC 1809
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-qwen35-ltsc1809-v040-optimized.yml'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download llama.cpp v0.4.0 source
+        id: src
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -UseBasicParsing 'https://github.com/ggml-org/llama.cpp/archive/refs/tags/v0.4.0.zip' -OutFile 'llama-v0.4.0.zip'
+          Expand-Archive -LiteralPath 'llama-v0.4.0.zip' -DestinationPath '.' -Force
+          $src = Get-ChildItem -Directory | Where-Object { $_.Name -like 'llama.cpp-*' } | Select-Object -First 1
+          if (-not $src) { throw 'llama.cpp source directory not found' }
+          if (-not (Test-Path (Join-Path $src.FullName 'src\models\qwen35.cpp'))) { throw 'Qwen3.5 support not found' }
+          "path=$($src.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "Source: $($src.FullName)"
+
+      - name: Locate Visual Studio
+        id: vs
+        shell: powershell
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          if (-not $vs) { throw 'Visual Studio not found' }
+          "path=$vs" >> $env:GITHUB_OUTPUT
+
+      - name: Install MSVC v142 if missing
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vs = '${{ steps.vs.outputs.path }}'
+          $v142 = Get-ChildItem "$vs\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '14.29*' } | Select-Object -First 1
+          if (-not $v142) {
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            $p = Start-Process -FilePath $installer -ArgumentList @('modify','--installPath',$vs,'--add','Microsoft.VisualStudio.ComponentGroup.VC.Tools.142.x86.x64','--quiet','--norestart','--nocache') -Wait -PassThru
+            if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "VS installer failed: $($p.ExitCode)" }
+          }
+
+      - name: Verify MSVC 19.29
+        shell: cmd
+        run: |
+          call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.29
+          cl 2>&1 | findstr /C:"19.29"
+          if errorlevel 1 exit /b 1
+
+      - name: Configure optimized CPU build
+        shell: cmd
+        run: |
+          call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.29
+          cmake -S "${{ steps.src.outputs.path }}" -B build -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+            -DBUILD_SHARED_LIBS=OFF ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_LTO=ON ^
+            -DGGML_SSE42=ON ^
+            -DGGML_AVX=ON ^
+            -DGGML_AVX2=ON ^
+            -DGGML_BMI2=ON ^
+            -DGGML_AVX_VNNI=OFF ^
+            -DGGML_AVX512=OFF ^
+            -DGGML_AVX512_VBMI=OFF ^
+            -DGGML_AVX512_VNNI=OFF ^
+            -DGGML_AVX512_BF16=OFF ^
+            -DGGML_CPU_REPACK=ON ^
+            -DGGML_LLAMAFILE=OFF ^
+            -DGGML_BLAS=OFF ^
+            -DGGML_OPENMP=OFF ^
+            -DGGML_CUDA=OFF ^
+            -DGGML_VULKAN=OFF ^
+            -DGGML_SYCL=OFF ^
+            -DGGML_RPC=OFF ^
+            -DLLAMA_CURL=OFF ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DLLAMA_BUILD_EXAMPLES=ON ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DCMAKE_C_FLAGS="/O2 /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00" ^
+            -DCMAKE_CXX_FLAGS="/O2 /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00"
+
+      - name: Build server and benchmark
+        shell: cmd
+        run: |
+          call "${{ steps.vs.outputs.path }}\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.29
+          cmake --build build --target llama-server llama-bench -j 2
+
+      - name: Collect optimized package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $server = Get-ChildItem build -Recurse -Filter llama-server.exe | Select-Object -First 1
+          $bench = Get-ChildItem build -Recurse -Filter llama-bench.exe | Select-Object -First 1
+          if (-not $server) { throw 'llama-server.exe not found' }
+          if (-not $bench) { throw 'llama-bench.exe not found' }
+          Copy-Item $server.FullName dist\llama-server.exe
+          Copy-Item $bench.FullName dist\llama-bench.exe
+
+          Get-ChildItem $server.Directory.FullName -Filter '*.dll' -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path 'dist' $_.Name) -Force
+          }
+          Get-ChildItem build -Recurse -Include 'ggml*.dll','llama.dll' -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path 'dist' $_.Name) -Force
+          }
+
+          $opensslCandidates = @(
+            'C:\Program Files\OpenSSL\bin',
+            'C:\Program Files\OpenSSL-Win64\bin',
+            'C:\Program Files\OpenSSL\lib\VC\x64\MD',
+            'C:\Program Files\OpenSSL\lib\VC\x64\MT'
+          )
+          foreach ($dll in @('libssl-3-x64.dll','libcrypto-3-x64.dll')) {
+            $found = $null
+            foreach ($dir in $opensslCandidates) {
+              $p = Join-Path $dir $dll
+              if (Test-Path $p) { $found = $p; break }
+            }
+            if (-not $found) {
+              $found = Get-ChildItem 'C:\Program Files' -Recurse -Filter $dll -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+            }
+            if (-not $found) { throw "$dll not found on runner" }
+            Copy-Item $found (Join-Path 'dist' $dll) -Force
+          }
+
+          $versionBat = @(
+            '@echo off',
+            'cd /d "%~dp0"',
+            'llama-server.exe --version',
+            'echo.',
+            'echo Exit code: %errorlevel%',
+            'pause'
+          )
+          [System.IO.File]::WriteAllLines((Join-Path (Resolve-Path dist) 'TEST_VERSION.bat'), $versionBat, [System.Text.Encoding]::ASCII)
+
+          $benchBat = @(
+            '@echo off',
+            'cd /d "%~dp0"',
+            'if "%~1"=="" (',
+            '  echo Drag Qwen3.5-2B-Q4_K_M.gguf onto this BAT file.',
+            '  echo Or run: BENCH_QWEN35.bat "C:\path\Qwen3.5-2B-Q4_K_M.gguf"',
+            '  pause',
+            '  exit /b 1',
+            ')',
+            'llama-bench.exe -m "%~1" -p 512 -n 128 -t 4 -r 3',
+            'pause'
+          )
+          [System.IO.File]::WriteAllLines((Join-Path (Resolve-Path dist) 'BENCH_QWEN35.bat'), $benchBat, [System.Text.Encoding]::ASCII)
+
+          $runBat = @(
+            '@echo off',
+            'cd /d "%~dp0"',
+            'if "%~1"=="" (',
+            '  echo Drag Qwen3.5-2B-Q4_K_M.gguf onto this BAT file.',
+            '  pause',
+            '  exit /b 1',
+            ')',
+            'llama-server.exe -m "%~1" --host 127.0.0.1 --port 8080 -c 16384 -t 4 -tb 4 -b 512 -ub 128 --reasoning off --jinja',
+            'echo.',
+            'echo Exit code: %errorlevel%',
+            'pause'
+          )
+          [System.IO.File]::WriteAllLines((Join-Path (Resolve-Path dist) 'RUN_QWEN35_OPT.bat'), $runBat, [System.Text.Encoding]::ASCII)
+
+          @'
+          Qwen3.5 2B Q4 LTSC 1809 optimized CPU build
+          Source: llama.cpp v0.4.0
+          Target CPU: Intel 8th/9th/10th-gen-class x64 with AVX2/BMI2/FMA/F16C
+          Compiler: MSVC v142 / 14.29 / 19.29
+          LTO: ON
+          CPU repack: ON
+          Native: OFF (portable across compatible AVX2 CPUs)
+          AVX-VNNI/AVX512: OFF for 9th-gen Intel compatibility
+          OpenMP/BLAS/CUDA/Vulkan/SYCL/RPC/CURL: OFF
+          Static CRT requested
+          OpenSSL runtime DLLs bundled
+          Includes llama-bench.exe for A/B testing
+          RUN_QWEN35_OPT.bat forces native Jinja chat + reasoning off
+          '@ | Set-Content -Encoding UTF8 dist\BUILD_INFO.txt
+
+          Get-ChildItem dist | Format-Table Name,Length
+
+      - name: Smoke test
+        shell: cmd
+        run: |
+          dist\llama-server.exe --version
+          dist\llama-bench.exe --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-qwen35-2b-q4-ltsc1809-v040-v142-avx2-bmi2-lto
+          path: dist\*
+          if-no-files-found: error
+          compression-level: 9
