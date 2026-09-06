@@ -1,0 +1,81 @@
+name: General-128 V0.8 standard LLM benchmark
+
+on:
+  push:
+    branches: [general128-v08-language-cortex]
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install benchmark dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'datasets>=3.0,<5' pyarrow
+
+      - name: Validate V0.8
+        run: |
+          python -m py_compile general128_v07.py general128_v08.py benchmark_llm_standard_v01.py benchmark_general128_v08_standard.py
+
+      - name: Download Qwen and Smol Q4_K_M
+        run: |
+          curl -L --fail --retry 4 --retry-delay 5 -o qwen.gguf 'https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf?download=true'
+          curl -L --fail --retry 4 --retry-delay 5 -o smol.gguf 'https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf?download=true'
+          stat -c 'qwen_bytes=%s' qwen.gguf | tee model_identity.txt
+          stat -c 'smol_bytes=%s' smol.gguf | tee -a model_identity.txt
+          sha256sum qwen.gguf smol.gguf | tee -a model_identity.txt
+
+      - name: Start llama.cpp servers
+        run: |
+          docker pull ghcr.io/ggml-org/llama.cpp:server
+          docker run -d --name qwen-server --network host -v "$PWD:/models" ghcr.io/ggml-org/llama.cpp:server \
+            -m /models/qwen.gguf -c 8192 -t 2 --host 127.0.0.1 --port 8080
+          docker run -d --name smol-server --network host -v "$PWD:/models" ghcr.io/ggml-org/llama.cpp:server \
+            -m /models/smol.gguf -c 8192 -t 2 --host 127.0.0.1 --port 8081
+          for port in 8080 8081; do
+            ok=0
+            for i in $(seq 1 90); do
+              if curl -fsS http://127.0.0.1:$port/health >/dev/null 2>&1; then ok=1; break; fi
+              sleep 2
+            done
+            if [ "$ok" != 1 ]; then docker logs qwen-server || true; docker logs smol-server || true; exit 1; fi
+          done
+
+      - name: Run same sampled standard benchmark
+        env:
+          HF_HUB_DISABLE_XET: '1'
+        run: |
+          python benchmark_general128_v08_standard.py \
+            --qwen-endpoint http://127.0.0.1:8080/v1/chat/completions \
+            --smol-endpoint http://127.0.0.1:8081/v1/chat/completions \
+            --samples 30 --seed 20260906 --out v08_standard_results.json \
+            | tee v08_standard_stdout.txt
+
+      - name: Show result
+        if: always()
+        run: |
+          test -f v08_standard_results.json && python - <<'PY'
+          import json
+          x=json.load(open('v08_standard_results.json'))
+          for m in x['compact']:
+              print('\n',m['model'],'macro=',round(100*m['macro_accuracy'],2),'%')
+              for k,v in m['tasks'].items(): print(k,round(100*v['accuracy'],2),'%',v['correct'],'/',v['n'],'cycles',v.get('mean_cycles'))
+          PY
+
+      - name: Upload V0.8 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: general128-v08-standard-results
+          path: |
+            v08_standard_results.json
+            v08_standard_stdout.txt
+            model_identity.txt
+          if-no-files-found: warn
