@@ -1,0 +1,17 @@
+name: R3.3 diagnose sample
+on:
+  push:
+    branches: [general128-v09r32-search-verify]
+    paths:
+      - diagnose_r33_sample.py
+      - .github/workflows/r33-diagnose-sample.yml
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install 'datasets>=3.0,<5' pyarrow
+      - run: python diagnose_r33_sample.py
