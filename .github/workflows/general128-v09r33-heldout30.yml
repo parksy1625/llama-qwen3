@@ -1,0 +1,98 @@
+name: General-128 V0.9R3.3 held-out 30 GSM
+on:
+  push:
+    branches: [general128-v09r33-typed-graph]
+    paths:
+      - .github/workflows/general128-v09r33-heldout30.yml
+      - general128_v09r33.py
+      - benchmark_general128_v09r33_gsm.py
+jobs:
+  heldout30:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install benchmark dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'datasets>=3.0,<5' pyarrow numpy
+      - name: Validate R3.3 code
+        run: python -m py_compile general128_v09r33.py benchmark_general128_v09r33_gsm.py
+      - name: Download exact Qwen Q4_K_M
+        run: |
+          curl -L --fail --retry 4 --retry-delay 5 -o qwen.gguf 'https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf?download=true'
+          stat -c 'qwen_bytes=%s' qwen.gguf
+          sha256sum qwen.gguf
+      - name: Start Qwen server
+        run: |
+          docker pull ghcr.io/ggml-org/llama.cpp:server
+          docker run -d --name qwen --network host -v "$PWD:/models" ghcr.io/ggml-org/llama.cpp:server -m /models/qwen.gguf -c 8192 -t 2 --host 127.0.0.1 --port 8080
+          for i in $(seq 1 90); do curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1 && exit 0; sleep 2; done
+          docker logs qwen; exit 1
+      - name: Run unseen 30 problem R3.3 benchmark
+        env:
+          HF_HUB_DISABLE_XET: '1'
+        run: |
+          python benchmark_general128_v09r33_gsm.py \
+            --endpoint http://127.0.0.1:8080/v1/chat/completions \
+            --samples 30 --seed 20260906 \
+            --out v09r33_heldout30.json | tee v09r33_heldout30_stdout.txt
+      - name: Analyze routing outcomes
+        run: |
+          python - <<'PY'
+          import json
+          x=json.load(open('v09r33_heldout30.json'))
+          rows=x['rows']
+          beneficial=sum((not r['base_ok']) and r['v09r33_ok'] for r in rows)
+          harmful=sum(r['base_ok'] and (not r['v09r33_ok']) for r in rows)
+          routed=sum(bool(r['routed']) for r in rows)
+          overrides=sum(bool(r['override']) for r in rows)
+          routed_correct=sum(bool(r['routed']) and r['v09r33_ok'] for r in rows)
+          fallback=[r for r in rows if not r['routed']]
+          fallback_correct=sum(r['v09r33_ok'] for r in fallback)
+          neutral=sum(r['base_ok']==r['v09r33_ok'] for r in rows)
+          summary={
+            'n':len(rows),
+            'baseline_correct':x['baseline_correct'],
+            'baseline_accuracy':x['baseline_accuracy'],
+            'r33_correct':x['v09r33_correct'],
+            'r33_accuracy':x['v09r33_accuracy'],
+            'delta':x['delta'],
+            'routed':routed,
+            'routing_coverage':routed/len(rows),
+            'overrides':overrides,
+            'beneficial_fixes':beneficial,
+            'harmful_overrides':harmful,
+            'neutral_correctness':neutral,
+            'routed_correct':routed_correct,
+            'routed_accuracy':routed_correct/routed if routed else None,
+            'fallback_n':len(fallback),
+            'fallback_correct':fallback_correct,
+            'fallback_accuracy':fallback_correct/len(fallback) if fallback else None,
+            'causal_math_ops':x['snapshot']['causal_math_ops'],
+            'family_counts':x['snapshot']['family_counts'],
+          }
+          print(json.dumps(summary,indent=2))
+          open('v09r33_heldout30_summary.json','w').write(json.dumps(summary,indent=2))
+          print('\nHARMFUL')
+          for r in rows:
+            if r['base_ok'] and not r['v09r33_ok']:
+              print(json.dumps(r,ensure_ascii=False))
+          print('\nBENEFICIAL')
+          for r in rows:
+            if (not r['base_ok']) and r['v09r33_ok']:
+              print(json.dumps(r,ensure_ascii=False))
+          print('\nROUTED WRONG')
+          for r in rows:
+            if r['routed'] and not r['v09r33_ok']:
+              print(json.dumps(r,ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: general128-v09r33-heldout30-results
+          path: |
+            v09r33_heldout30.json
+            v09r33_heldout30_summary.json
+            v09r33_heldout30_stdout.txt
