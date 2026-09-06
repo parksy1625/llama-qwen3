@@ -1,0 +1,19 @@
+name: General-128 V0.9R3.3 regression
+on:
+  push:
+    branches: [general128-v09r33-typed-graph]
+    paths:
+      - general128_v09r33.py
+      - test_general128_v09r33_regression.py
+      - .github/workflows/general128-v09r33-regression.yml
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install numpy
+      - run: python -m py_compile general128_v09r33.py test_general128_v09r33_regression.py
+      - run: python test_general128_v09r33_regression.py
