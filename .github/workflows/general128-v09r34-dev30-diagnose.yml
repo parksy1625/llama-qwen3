@@ -1,0 +1,17 @@
+name: General-128 V0.9R3.4 dev30 diagnose
+on:
+  push:
+    branches: [general128-v09r34-generic-graph]
+    paths:
+      - diagnose_r34_dev30_questions.py
+      - .github/workflows/general128-v09r34-dev30-diagnose.yml
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install 'datasets>=3.0,<5' pyarrow
+      - run: python diagnose_r34_dev30_questions.py
