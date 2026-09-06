@@ -1,0 +1,36 @@
+name: General-128 V0.9 quick causal GSM
+on:
+  push:
+    branches: [general128-v09-quick]
+  workflow_dispatch:
+jobs:
+  quick:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: |
+          python -m pip install --upgrade pip
+          pip install 'datasets>=3.0,<5' pyarrow
+      - run: |
+          curl -L --fail --retry 4 --retry-delay 5 -o qwen.gguf 'https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf?download=true'
+      - name: Start Qwen
+        run: |
+          docker pull ghcr.io/ggml-org/llama.cpp:server
+          docker run -d --name qwen --network host -v "$PWD:/models" ghcr.io/ggml-org/llama.cpp:server -m /models/qwen.gguf -c 8192 -t 2 --host 127.0.0.1 --port 8080
+          for i in $(seq 1 90); do curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1 && exit 0; sleep 2; done
+          exit 1
+      - name: Run 5 problem causal check
+        env: {HF_HUB_DISABLE_XET: '1'}
+        run: |
+          python benchmark_general128_v09_gsm.py --endpoint http://127.0.0.1:8080/v1/chat/completions --samples 5 --seed 20261905 --out v09_quick.json | tee v09_quick_stdout.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: general128-v09-quick-results
+          path: |
+            v09_quick.json
+            v09_quick_stdout.txt
+          if-no-files-found: warn
