@@ -1,0 +1,41 @@
+name: General-128 V0.7 fair benchmark
+on:
+  push:
+    branches: [general128-v07-fair]
+  workflow_dispatch:
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate code
+        run: python -m py_compile general128_v07.py benchmark_general128_v07.py benchmark_general128_v07_fair.py
+      - name: Download Qwen Q4_K_M
+        run: |
+          curl -L --fail --retry 4 --retry-delay 5 -o qwen.gguf 'https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf?download=true'
+          stat -c%s qwen.gguf | tee qwen_size.txt
+          sha256sum qwen.gguf | tee qwen_sha256.txt
+      - name: Start llama.cpp server
+        run: |
+          docker pull ghcr.io/ggml-org/llama.cpp:server
+          docker run -d --name qwen-server --network host -v "$PWD:/models" ghcr.io/ggml-org/llama.cpp:server -m /models/qwen.gguf -c 8192 -t 2 --host 127.0.0.1 --port 8080
+          for i in $(seq 1 90); do curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1 && exit 0; sleep 2; done
+          docker logs qwen-server; exit 1
+      - name: Run fair benchmark
+        run: |
+          python benchmark_general128_v07_fair.py --outdir fair_results --qwen-endpoint http://127.0.0.1:8080/v1/chat/completions | tee fair_stdout.txt
+          cat fair_results/REPORT.md
+          echo '=== RAW QWEN ==='
+          cat fair_results/Qwen2.5-0.5B-Instruct-Q4_K_M-fair_raw.json
+          cp qwen_size.txt qwen_sha256.txt fair_stdout.txt fair_results/
+      - name: Upload fair results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: general128-v07-qwen05-fair-results
+          path: fair_results/
+          if-no-files-found: warn
