@@ -1,0 +1,101 @@
+name: General-128 V0.7 benchmark
+
+on:
+  push:
+    branches: [general128-v07-experiment]
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax and smoke test
+        run: |
+          python -m py_compile general128_v07.py benchmark_general128_v07.py
+          python general128_v07.py
+          python benchmark_general128_v07.py --outdir smoke_results
+          cat smoke_results/REPORT.md
+
+      - name: Download exact Qwen2.5-0.5B Q4_K_M
+        shell: bash
+        run: |
+          set -euxo pipefail
+          URL='https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf?download=true'
+          curl -L --fail --retry 4 --retry-delay 5 -o qwen2.5-0.5b-instruct-q4_k_m.gguf "$URL"
+          ls -lh qwen2.5-0.5b-instruct-q4_k_m.gguf
+          ACTUAL=$(stat -c%s qwen2.5-0.5b-instruct-q4_k_m.gguf)
+          echo "downloaded_bytes=$ACTUAL"
+          # User Library reference copy is 397,808,192 bytes. Do not fail only on
+          # metadata drift, but record whether this public Q4_K_M matches exactly.
+          if [ "$ACTUAL" = '397808192' ]; then
+            echo 'size_match_user_library=true' | tee qwen_model_identity.txt
+          else
+            echo 'size_match_user_library=false' | tee qwen_model_identity.txt
+            echo "actual_bytes=$ACTUAL" >> qwen_model_identity.txt
+          fi
+          sha256sum qwen2.5-0.5b-instruct-q4_k_m.gguf | tee -a qwen_model_identity.txt
+
+      - name: Build llama.cpp server
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+          cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
+          cmake --build /tmp/llama.cpp/build --config Release -j2 --target llama-server
+          /tmp/llama.cpp/build/bin/llama-server --version || true
+
+      - name: Start Qwen server
+        shell: bash
+        run: |
+          set -euxo pipefail
+          nohup /tmp/llama.cpp/build/bin/llama-server \
+            -m qwen2.5-0.5b-instruct-q4_k_m.gguf \
+            -c 8192 -t 2 --host 127.0.0.1 --port 8080 \
+            > llama_server.log 2>&1 &
+          echo $! > llama_server.pid
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              echo 'Qwen server is ready'
+              exit 0
+            fi
+            sleep 2
+          done
+          cat llama_server.log
+          exit 1
+
+      - name: Run matched benchmark
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf benchmark_results
+          python benchmark_general128_v07.py \
+            --outdir benchmark_results \
+            --qwen-endpoint http://127.0.0.1:8080/v1/chat/completions \
+            | tee benchmark_stdout.txt
+          cat benchmark_results/REPORT.md
+          cp llama_server.log benchmark_results/llama_server.log
+          cp qwen_model_identity.txt benchmark_results/qwen_model_identity.txt
+          cp benchmark_stdout.txt benchmark_results/benchmark_stdout.txt
+
+      - name: Upload benchmark artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: general128-v07-qwen05-results
+          path: |
+            benchmark_results/
+            smoke_results/
+            qwen_model_identity.txt
+            llama_server.log
+          if-no-files-found: warn
