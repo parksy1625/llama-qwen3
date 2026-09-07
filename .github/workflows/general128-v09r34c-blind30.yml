@@ -1,0 +1,80 @@
+name: General-128 V0.9R3.4C fresh blind 30 GSM
+on:
+  push:
+    branches: [general128-v09r34-generic-graph]
+    paths:
+      - .github/workflows/general128-v09r34c-blind30.yml
+      - benchmark_general128_v09r34c_blind.py
+      - general128_v09r34c.py
+      - general128_v09r34b.py
+      - general128_v09r34.py
+      - general128_v09r33.py
+jobs:
+  blind30:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install benchmark dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'datasets>=3.0,<5' pyarrow numpy
+      - name: Freeze-check R3.4C code
+        run: |
+          python -m py_compile general128_v09r33.py general128_v09r34.py general128_v09r34b.py general128_v09r34c.py benchmark_general128_v09r34c_blind.py
+          git diff --exit-code
+      - name: Download exact Qwen 0.5B Q4_K_M baseline
+        run: |
+          curl -L --fail --retry 4 --retry-delay 5 -o qwen.gguf 'https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf?download=true'
+          stat -c 'qwen_bytes=%s' qwen.gguf
+          sha256sum qwen.gguf
+      - name: Start Qwen server
+        run: |
+          docker pull ghcr.io/ggml-org/llama.cpp:server
+          docker run -d --name qwen --network host -v "$PWD:/models" ghcr.io/ggml-org/llama.cpp:server -m /models/qwen.gguf -c 8192 -t 2 --host 127.0.0.1 --port 8080
+          for i in $(seq 1 90); do curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1 && exit 0; sleep 2; done
+          docker logs qwen; exit 1
+      - name: Run fresh seed 20260907 blind 30
+        env:
+          HF_HUB_DISABLE_XET: '1'
+        run: |
+          python benchmark_general128_v09r34c_blind.py \
+            --endpoint http://127.0.0.1:8080/v1/chat/completions \
+            --samples 30 --seed 20260907 \
+            --out v09r34c_blind30.json \
+            --summary-out v09r34c_blind30_summary.json | tee v09r34c_blind30_stdout.txt
+      - name: Print validation verdict
+        run: |
+          python - <<'PY'
+          import json
+          s=json.load(open('v09r34c_blind30_summary.json'))
+          reproduced=(
+              s['accuracy_delta'] > 0 and
+              s['routing_coverage'] > 0 and
+              s['beneficial_fixes'] > s['harmful_overrides'] and
+              s['causal_general128_ops'] > 0
+          )
+          verdict={
+              'progress_reproduced': reproduced,
+              'baseline_accuracy': s['baseline_accuracy'],
+              'r34c_accuracy': s['r34c_accuracy'],
+              'accuracy_delta': s['accuracy_delta'],
+              'routing_coverage': s['routing_coverage'],
+              'routed_accuracy': s['routed_accuracy'],
+              'beneficial_fixes': s['beneficial_fixes'],
+              'harmful_overrides': s['harmful_overrides'],
+              'causal_general128_ops': s['causal_general128_ops'],
+          }
+          print(json.dumps(verdict, indent=2))
+          open('v09r34c_blind30_verdict.json','w').write(json.dumps(verdict,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: general128-v09r34c-blind30-results
+          path: |
+            v09r34c_blind30.json
+            v09r34c_blind30_summary.json
+            v09r34c_blind30_verdict.json
+            v09r34c_blind30_stdout.txt
