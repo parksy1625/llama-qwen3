@@ -1,0 +1,57 @@
+name: Mini-200 V0.5.3 Real SmolLM2 GSM8K
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ mini200-v053-experiment ]
+    paths:
+      - 'mini200_v053/**'
+      - '.github/workflows/mini200-v053-smollm2.yml'
+
+jobs:
+  experiment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      HF_HUB_DISABLE_XET: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      STEPS: '100'
+      GSM_GEN_N: '6'
+      GSM_NLL_N: '30'
+      MMLU_N: '30'
+      LR: '0.00025'
+      MODEL_ID: 'HuggingFaceTB/SmolLM2-135M-Instruct'
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          python -m pip install 'torch>=2.4,<2.11' 'transformers>=4.48,<5' 'datasets>=3,<5' 'accelerate>=1,<2' 'safetensors>=0.4' 'huggingface_hub>=0.28'
+
+      - name: Run actual SmolLM2 transplant + GSM8K/MMLU experiment
+        working-directory: mini200_v053
+        run: |
+          python run_experiment.py 2>&1 | tee run.log
+
+      - name: Upload experiment results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mini200-v053-results-${{ github.run_number }}
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 1
+          path: |
+            mini200_v053/run.log
+            mini200_v053/mini200_ci_out/results.json
+            mini200_v053/mini200_ci_out/sidecar_fp16.pt
